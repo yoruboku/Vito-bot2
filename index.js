@@ -1,214 +1,241 @@
-// index.js
-import {
-  Client,
-  GatewayIntentBits,
-  EmbedBuilder,
-  Partials
-} from "discord.js";
-import CONFIG from "./config.js";
-import { loadRoles, getUserRole, getPriority } from "./roles.js";
-import { newSessionForUser } from "./sessions.js";
-import { routeAIRequest } from "./router.js";
+// ======================= index.js (Main Controller) =======================
+// Core controller for Vito-bot using Node.js
+// Handles Discord events, role priority, mode switching, and AI routing
 
-loadRoles();
+import { Client, GatewayIntentBits, EmbedBuilder } from 'discord.js';
+import { routeAIRequest } from './router.js';
+import { getUserRole } from './roles.js';
+import CONFIG from './config.js';
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ],
-  partials: [Partials.Channel]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
-
-const PREFIX = "/mention";
 
 let statusMessageId = null;
-let statusChannel = null;
 
-// Simple queue + preemption
-const queue = [];
-let processing = false;
-let currentContext = null;
-let currentJobMessage = null;
-
-function processQueue() {
-  if (processing) return;
-  if (queue.length === 0) return;
-  processing = true;
-
-  (async () => {
-    try {
-      // pick highest priority job
-      let bestIndex = 0;
-      for (let i = 1; i < queue.length; i++) {
-        if (getPriority(queue[i].role) > getPriority(queue[bestIndex].role)) {
-          bestIndex = i;
-        }
-      }
-
-      const job = queue.splice(bestIndex, 1)[0];
-      const { message, role, content } = job;
-      const context = { cancelled: false, cliProcess: null, role };
-
-      currentContext = context;
-      currentJobMessage = message;
-
-      const embed = await routeAIRequest({
-        content,
-        role,
-        user: message.author,
-        context
-      });
-
-      if (!context.cancelled && embed) {
-        await message.reply({
-          content: `<@${message.author.id}>`,
-          embeds: embed.data ? [new EmbedBuilder(embed.data)] : [embed]
-        });
-      }
-    } catch (err) {
-      console.error("Error in processQueue:", err);
-      if (currentJobMessage) {
-        await currentJobMessage.reply(
-          "Something went wrong while processing your request."
-        );
-      }
-    } finally {
-      currentContext = null;
-      currentJobMessage = null;
-      processing = false;
-      if (queue.length > 0) processQueue();
-    }
-  })();
-}
-
-function enqueueJob(message, role, content) {
-  queue.push({ message, role, content });
-  processQueue();
-}
-
-client.once("ready", async () => {
+client.once('ready', async () => {
   console.log(`Vito-bot online as ${client.user.tag}`);
+  const channel = await client.channels.fetch(CONFIG.statusChannelId);
 
-  try {
-    statusChannel = await client.channels.fetch(CONFIG.statusChannelId);
-    const embed = new EmbedBuilder()
-      .setTitle("Vito-bot")
-      .setDescription("AI Core Online")
-      .setColor(0x01308c)
-      .addFields(
-        { name: "Mode", value: "Idle", inline: true },
-        { name: "Latency", value: "-- ms", inline: true }
-      )
-      .setFooter({ text: "Cyber Interface Active" })
-      .setTimestamp();
+  const embed = new EmbedBuilder()
+    .setTitle('Vito-bot')
+    .setDescription('AI Core Online')
+    .setColor(0x01308c)
+    .addFields(
+      { name: 'Mode', value: 'Idle', inline: true },
+      { name: 'Latency', value: '-- ms', inline: true }
+    )
+    .setFooter({ text: 'Cyber Interface Active' })
+    .setTimestamp();
 
-    const msg = await statusChannel.send({ embeds: [embed] });
-    statusMessageId = msg.id;
+  const msg = await channel.send({ embeds: [embed] });
+  statusMessageId = msg.id;
 
-    setInterval(async () => {
-      try {
-        const fetched = await statusChannel.messages.fetch(statusMessageId);
-        const newEmbed = EmbedBuilder.from(fetched.embeds[0])
-          .setFields(
-            {
-              name: "Mode",
-              value: processing ? "Active" : "Idle",
-              inline: true
-            },
-            {
-              name: "Latency",
-              value: `${Math.round(client.ws.ping)} ms`,
-              inline: true
-            }
-          )
-          .setTimestamp();
-        await fetched.edit({ embeds: [newEmbed] });
-      } catch {
-        // ignore
-      }
-    }, 3000);
-  } catch (e) {
-    console.error("Failed to setup status panel:", e);
-  }
+  setInterval(async () => {
+    try {
+      const fetched = await channel.messages.fetch(statusMessageId);
+      embed.setFields(
+        { name: 'Mode', value: 'Active', inline: true },
+        { name: 'Latency', value: `${Math.round(client.ws.ping)} ms`, inline: true }
+      );
+      await fetched.edit({ embeds: [embed] });
+    } catch (e) {}
+  }, 3000);
 });
 
-client.on("messageCreate", async (message) => {
+client.on('messageCreate', async message => {
+  if (!message.content.startsWith('/mention')) return;
   if (message.author.bot) return;
 
-  let content = message.content.trim();
-  let used = false;
+  const content = message.content.replace('/mention', '').trim();
+  const role = getUserRole(message.author.username);
 
-  // /mention ...
-  if (content.startsWith(PREFIX)) {
-    content = content.slice(PREFIX.length).trim();
-    used = true;
-  } else if (message.mentions.has(client.user)) {
-    // @Vito-bot ...
-    content = content
-      .replace(`<@${client.user.id}>`, "")
-      .replace(`<@!${client.user.id}>`, "")
-      .trim();
-    used = true;
+  if (content === 'stop' && role !== 'creator') {
+    return message.reply(`${message.author} cannot stop active processes.`);
   }
 
-  if (!used || content.length === 0) return;
-
-  const username = message.author.username;
-  const role = getUserRole(username);
-
-  // STOP logic
-  if (content.toLowerCase() === "stop") {
-    if (role === "creator") {
-      // creator can stop any current job
-      if (currentContext) {
-        currentContext.cancelled = true;
-        if (currentContext.cliProcess) {
-          currentContext.cliProcess.kill("SIGTERM");
-        }
-        await message.reply("All active processes stopped by creator.");
-      } else {
-        await message.reply("No active processes to stop.");
-      }
-    } else {
-      // non-creator can only stop their own job, and never creator's
-      if (currentJobMessage && currentJobMessage.author.id === message.author.id) {
-        if (currentContext && currentContext.role !== "creator") {
-          currentContext.cancelled = true;
-          if (currentContext.cliProcess) {
-            currentContext.cliProcess.kill("SIGTERM");
-          }
-          await message.reply("Your current request has been stopped.");
-        } else {
-          await message.reply("You cannot stop the creator.");
-        }
-      } else {
-        await message.reply("You have no active request to stop.");
-      }
-    }
-    return;
-  }
-
-  // NEWCHAT logic
-  if (content.toLowerCase() === "newchat") {
-    const dir = newSessionForUser(message.author.id, username);
-    await message.reply(
-      `<@${message.author.id}> started a new clean chat.\nSession folder: \`${dir}\``
-    );
-    return;
-  }
-
-  // Creator preemption: if creator speaks while someone else is running, kill and jump
-  if (role === "creator" && currentContext && currentContext.role !== "creator") {
-    currentContext.cancelled = true;
-    if (currentContext.cliProcess) {
-      currentContext.cliProcess.kill("SIGTERM");
-    }
-  }
-
-  // Queue the job (priority handled inside processQueue)
-  enqueueJob(message, role, content);
+  const responseEmbed = await routeAIRequest(content, role);
+  message.reply({ content: `${message.author}`, embeds: [responseEmbed] });
 });
 
 client.login(CONFIG.discordToken);
+
+
+// ======================= router.js =======================
+import { geminiAPIChat } from './services/gemini_api.js';
+import { geminiCLIChat } from './services/gemini_cli.js';
+import { veniceChat } from './services/venice.js';
+import CONFIG from './config.js';
+
+export async function routeAIRequest(prompt, role) {
+  if (prompt.startsWith('notnice') && CONFIG.geminiQuotaActive) {
+    return await veniceChat(prompt.replace('notnice', '').trim());
+  }
+  if (prompt.startsWith('archboku') && (role === 'creator' || role === 'admin')) {
+    return await geminiCLIChat(prompt.replace('archboku', '').trim());
+  }
+  if (CONFIG.geminiQuotaActive) return await geminiAPIChat(prompt);
+  return await geminiCLIChat(prompt);
+}
+
+
+// ======================= roles.js =======================
+const ROLES = {
+  'yoruboku': 'creator'
+};
+
+export function getUserRole(username) {
+  return ROLES[username] || 'everyone';
+}
+
+
+// ======================= config.js =======================
+export default {
+  discordToken: '',
+  statusChannelId: '',
+  geminiApiKey: '',
+  veniceApiKey: '',
+  geminiQuotaActive: true
+};
+
+
+// ======================= install.sh =======================
+#!/bin/bash
+
+# Universal Linux installer for Vito-bot
+# Works across Debian, Ubuntu, Arch, Fedora, Alpine, OpenSUSE and more
+
+clear
+PS3='Select option: '
+options=("Install" "Start" "Exit")
+
+install_deps() {
+  echo "Detecting package manager..."
+
+  if command -v apt >/dev/null; then
+    sudo apt update
+    sudo apt install -y nodejs npm curl whiptail firejail
+  elif command -v pacman >/dev/null; then
+    sudo pacman -Sy --noconfirm nodejs npm curl firejail
+  elif command -v dnf >/dev/null; then
+    sudo dnf install -y nodejs npm curl firejail
+  elif command -v zypper >/dev/null; then
+    sudo zypper install -y nodejs npm curl firejail
+  elif command -v apk >/dev/null; then
+    sudo apk add nodejs npm curl firejail
+  else
+    echo "Unsupported distro. Install nodejs, npm, curl, firejail manually."
+    exit 1
+  fi
+}
+
+select opt in "${options[@]}"; do
+  case $opt in
+    "Install")
+      echo "Installing Vito-bot (universal mode)..."
+      install_deps
+
+      npm install discord.js axios
+
+      read -p "Enter Gemini API Key: " GEMINIKEY
+      read -p "Enter Venice API Key: " VENICEKEY
+      read -p "Enter Discord Bot Token: " DISCORDTOKEN
+      read -p "Enter Status Channel ID: " CHANNELID
+
+cat <<EOF > config.js
+export default {
+  discordToken: "$DISCORDTOKEN",
+  statusChannelId: "$CHANNELID",
+  geminiApiKey: "$GEMINIKEY",
+  veniceApiKey: "$VENICEKEY",
+  geminiQuotaActive: true
+};
+EOF
+
+      mkdir -p gem-cli-chats
+
+      echo "Installing Gemini CLI in Firejail sandbox..."
+      curl -fsSL https://ai.google.dev/install.sh | bash
+
+      echo "Gemini CLI will now always run inside a sandboxed shell."
+
+      echo "Starting Vito-bot..."
+      node index.js
+      break
+      ;;
+
+    "Start")
+      node index.js
+      break
+      ;;
+
+    "Exit") break;;
+  esac
+done
+
+// ======================= services/gemini_api.js =======================
+import axios from 'axios';
+import CONFIG from '../config.js';
+import { EmbedBuilder } from 'discord.js';
+
+export async function geminiAPIChat(prompt) {
+  const response = await axios.post('https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=' + CONFIG.geminiApiKey, {
+    contents: [{ parts: [{ text: prompt }] }]
+  });
+
+  const text = response.data.candidates[0].content.parts[0].text;
+
+  return new EmbedBuilder()
+    .setColor(0x01308c)
+    .setTitle('Vito-bot')
+    .setDescription(text)
+    .setFooter({ text: 'Mode: Gemini API' })
+    .setTimestamp();
+}
+
+
+// ======================= services/venice.js =======================
+import axios from 'axios';
+import CONFIG from '../config.js';
+import { EmbedBuilder } from 'discord.js';
+
+export async function veniceChat(prompt) {
+  const response = await axios.post('https://api.venice.ai/v1/chat/completions', {
+    model: 'venice-uncensored',
+    messages: [{ role: 'user', content: prompt }]
+  }, {
+    headers: { Authorization: `Bearer ${CONFIG.veniceApiKey}` }
+  });
+
+  const text = response.data.choices[0].message.content;
+
+  return new EmbedBuilder()
+    .setColor(0x01308c)
+    .setTitle('Vito-bot')
+    .setDescription(text)
+    .setFooter({ text: 'Mode: Venice AI' })
+    .setTimestamp();
+}
+
+
+// ======================= services/gemini_cli.js =======================
+import { spawn } from 'child_process';
+import { EmbedBuilder } from 'discord.js';
+
+export function geminiCLIChat(prompt) {
+  return new Promise((resolve) => {
+    const process = spawn('firejail', ['--private', 'gemini', prompt]);
+
+    let output = '';
+    process.stdout.on('data', data => output += data.toString());
+
+    process.on('close', () => {
+      resolve(new EmbedBuilder()
+        .setColor(0x01308c)
+        .setTitle('Vito-bot')
+        .setDescription(output.trim())
+        .setFooter({ text: 'Mode: Gemini CLI (Universal Sandbox)' })
+        .setTimestamp());
+    });
+  });
+}
