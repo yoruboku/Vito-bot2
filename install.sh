@@ -1,10 +1,35 @@
-\#!/bin/bash
+#!/bin/bash
 set -e
 
-echo "Installing Vito-bot with isolated Gemini environment..."
+echo "Vito-bot Universal Installer"
 
-sudo apt update
-sudo apt install -y nodejs npm whiptail systemd-container debootstrap curl
+install_deps() {
+  echo "Detecting package manager..."
+
+  if command -v apt >/dev/null; then
+    sudo apt update
+    sudo apt install -y nodejs npm curl firejail whiptail
+
+  elif command -v pacman >/dev/null; then
+    sudo pacman -Sy --noconfirm nodejs npm curl firejail
+
+  elif command -v dnf >/dev/null; then
+    sudo dnf install -y nodejs npm curl firejail
+
+  elif command -v zypper >/dev/null; then
+    sudo zypper install -y nodejs npm curl firejail
+
+  elif command -v apk >/dev/null; then
+    sudo apk add nodejs npm curl firejail
+
+  else
+    echo "Unsupported Linux distro."
+    echo "Install nodejs, npm, curl and firejail manually."
+    exit 1
+  fi
+}
+
+install_deps
 
 npm install discord.js axios
 
@@ -25,17 +50,9 @@ EOF
 
 mkdir -p gem-cli-chats
 
-echo "Creating isolated Gemini environment..."
+echo "Installing Gemini CLI..."
+curl -fsSL https://ai.google.dev/install.sh | bash
 
-if [ ! -d "/opt/vito-gemini-env" ]; then
-  sudo debootstrap jammy /opt/vito-gemini-env http://archive.ubuntu.com/ubuntu/
-fi
-
-echo "Installing Gemini CLI inside isolated environment..."
-sudo systemd-nspawn -D /opt/vito-gemini-env bash -lc "curl -fsSL https://ai.google.dev/install.sh | bash"
-
-echo "Login to Gemini CLI (one-time)..."
-sudo systemd-nspawn -D /opt/vito-gemini-env gemini login
-
+echo "Gemini will run sandboxed using Firejail."
 echo "Starting Vito-bot..."
 node index.js
