@@ -1,0 +1,15 @@
+{
+  "name": "vito-bot",
+  "version": "1.0.0",
+  "description": "Discord AI bot using Gemini API, Gemini CLI, and Venice.ai",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "discord.js": "^14.16.3",
+    "fs-extra": "^11.3.0"
+  }
+}
